@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import io  # Required for handling the Excel file in memory
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Miner Profitability Modeling", layout="wide")
@@ -34,21 +35,16 @@ edited_df = st.data_editor(
     use_container_width=True,
     key="editor",
     column_config={
-        "Hashrate (TH/s)": st.column_config.NumberColumn(
-            min_value=0, 
-            step=0.1, 
-            format="%.2f"
-        ),
-        # UPDATED: Power now accepts decimals
-        "Power (W)": st.column_config.NumberColumn(
-            min_value=0, 
-            step=0.1, 
-            format="%.1f" # Display 1 decimal place (e.g. 3010.5)
-        ),
+        "Hashrate (TH/s)": st.column_config.NumberColumn(min_value=0, step=0.1, format="%.2f"),
+        "Power (W)": st.column_config.NumberColumn(min_value=0, step=0.1, format="%.1f"),
         "Model": st.column_config.TextColumn(required=True),
         "Profile": st.column_config.TextColumn()
     }
 )
+
+# Initialize variables for export
+comp_df_clean = None
+comparison_title = ""
 
 # --- Calculation Engine ---
 if not edited_df.empty:
@@ -87,7 +83,7 @@ if not edited_df.empty:
     final_cols = [c for c in cols_order if c in display_df.columns]
     display_df = display_df[final_cols]
 
-    # Rounding
+    # Rounding for UI
     display_df["Efficiency (J/TH)"] = display_df["Efficiency (J/TH)"].round(1)
     money_cols = ["Rev/Miner ($)", "Cost/Miner ($)", "Profit/Miner ($)", "Fleet Profit ($)"]
     display_df[money_cols] = display_df[money_cols].round(2)
@@ -102,7 +98,7 @@ if not edited_df.empty:
         selection_mode="multi-row",
         column_config={
             "Efficiency (J/TH)": st.column_config.NumberColumn(format="%.1f J/TH"),
-            "Power (W)": st.column_config.NumberColumn(format="%.1f W") # Display format in results too
+            "Power (W)": st.column_config.NumberColumn(format="%.1f W")
         }
     )
 
@@ -113,9 +109,7 @@ if not edited_df.empty:
         st.divider()
         st.subheader("⚖️ Comparison Mode")
         
-        # Helper to get row name for dropdown
         def get_row_name(idx):
-            # Safe access in case index is out of bounds
             if idx < len(display_df):
                 r = display_df.iloc[idx]
                 return f"{r['Model']} ({r['Profile']})"
@@ -123,22 +117,20 @@ if not edited_df.empty:
 
         # 1. Comparison Selectors
         col_sel_a, col_sel_b = st.columns(2)
-        
-        # Default: First selected is Baseline, Second is Target
         options_map = {idx: get_row_name(idx) for idx in selected_rows}
         
         with col_sel_a:
             idx_a = st.selectbox("Select Baseline (A)", options=selected_rows, format_func=lambda x: options_map.get(x, "Unknown"), key="a")
         with col_sel_b:
             default_b = selected_rows[1] if len(selected_rows) > 1 and idx_a == selected_rows[0] else selected_rows[0]
-            # Ensure default_b is in selected_rows
             if default_b not in selected_rows: default_b = selected_rows[0]
-                
             idx_b = st.selectbox("Select Target (B)", options=selected_rows, format_func=lambda x: options_map.get(x, "Unknown"), index=selected_rows.index(default_b), key="b")
 
         # 2. Extract Data
         row_a = display_df.iloc[idx_a]
         row_b = display_df.iloc[idx_b]
+        
+        comparison_title = f"Comparison: {options_map[idx_b]} vs Baseline {options_map[idx_a]}"
 
         # 3. Build Comparison Logic
         metrics_config = [
@@ -151,7 +143,8 @@ if not edited_df.empty:
             {"col": "Fleet Profit ($)", "better": "higher"},
         ]
         
-        comp_data = []
+        comp_data_display = [] # For Streamlit (with colors)
+        comp_data_clean = []   # For Excel (raw numbers)
         
         for item in metrics_config:
             metric = item['col']
@@ -166,50 +159,98 @@ if not edited_df.empty:
             else:
                 pct_diff = 0.0
             
-            # Determine Color Logic
-            # Green if: (Higher is better AND diff > 0) OR (Lower is better AND diff < 0)
+            # --- Visual Logic (Green/Red) for Streamlit ---
             is_positive_outcome = (is_higher_better and diff > 0) or (not is_higher_better and diff < 0)
             is_neutral = (diff == 0)
 
-            if is_neutral:
-                color = "gray"
-            elif is_positive_outcome:
-                color = "green"
-            else:
-                color = "red"
+            if is_neutral: color = "gray"
+            elif is_positive_outcome: color = "green"
+            else: color = "red"
 
-            # Format strings with colors for Streamlit Markdown
-            diff_str = f"{diff:+.2f}"
-            pct_str = f"{pct_diff:+.2f}%"
-            
-            colored_diff = f":{color}[{diff_str}]"
-            colored_pct = f":{color}[{pct_str}]"
-            
-            comp_data.append({
+            comp_data_display.append({
                 "Metric": metric,
                 "Baseline (A)": val_a,
                 "Target (B)": val_b,
-                "Difference": colored_diff,
-                "% Change": colored_pct
+                "Difference": f":{color}[{diff:+.2f}]",
+                "% Change": f":{color}[{pct_diff:+.2f}%]"
             })
             
-        # 4. Render Table
-        comp_df = pd.DataFrame(comp_data)
+            # --- Clean Logic for Excel ---
+            comp_data_clean.append({
+                "Metric": metric,
+                "Baseline (A)": val_a,
+                "Target (B)": val_b,
+                "Diff": diff,
+                "% Change": pct_diff / 100 # Store as decimal for Excel % formatting
+            })
+            
+        # 4. Render Table in App
+        comp_df = pd.DataFrame(comp_data_display)
+        comp_df_clean = pd.DataFrame(comp_data_clean) # Save this for Export
         
-        # We use st.markdown to render the dataframe so the :green[] syntax works
-        st.markdown(
-            comp_df.to_markdown(index=False), 
-            unsafe_allow_html=True
-        )
-        st.caption(f"Comparing **{options_map[idx_b]}** against baseline **{options_map[idx_a]}**")
+        st.markdown(comp_df.to_markdown(index=False), unsafe_allow_html=True)
+        st.caption(comparison_title)
             
     elif len(selected_rows) > 2:
         st.warning("Please select exactly 2 rows to compare.")
     
-    # --- Export ---
+    # --- PROFESSIONAL EXCEL EXPORT ---
     st.divider()
-    csv = display_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download CSV", data=csv, file_name="mining_calc.csv", mime="text/csv")
+    
+    # 1. Create a buffer to hold the Excel file in memory
+    buffer = io.BytesIO()
+    
+    # 2. Use xlsxwriter to create the file
+    # We use 'xlsxwriter' because it allows nice formatting (column widths, etc.)
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        
+        # --- SHEET 1: MODEL SUMMARY ---
+        # Create a dataframe for the global settings
+        settings_data = {
+            "Parameter": ["Power Price ($/kWh)", "Hashprice ($/PH/Day)", "Pool Fee (%)", "Fleet Size"],
+            "Value": [power_price, hashprice, pool_fee_percent, fleet_size]
+        }
+        settings_df = pd.DataFrame(settings_data)
+        
+        # Write Settings
+        settings_df.to_excel(writer, sheet_name='Model Report', startrow=0, startcol=0, index=False)
+        
+        # Write Main Data (Leave a gap of 2 rows)
+        display_df.to_excel(writer, sheet_name='Model Report', startrow=6, startcol=0, index=False)
+        
+        # Access the workbook/worksheet for formatting
+        workbook = writer.book
+        worksheet = writer.sheets['Model Report']
+        
+        # Add a Header Format
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+        money_fmt = workbook.add_format({'num_format': '$#,##0.00'})
+        
+        # Widen Columns for readability
+        worksheet.set_column('A:A', 25) # Parameter / Model Name
+        worksheet.set_column('B:I', 18) # Data columns
+        
+        # --- SHEET 2: COMPARISON (If Active) ---
+        if comp_df_clean is not None:
+            comp_df_clean.to_excel(writer, sheet_name='Comparison', startrow=2, index=False)
+            ws_comp = writer.sheets['Comparison']
+            
+            # Write a title row
+            ws_comp.write(0, 0, comparison_title, workbook.add_format({'bold': True, 'font_size': 12}))
+            
+            # Format % column (Column E is index 4)
+            pct_fmt = workbook.add_format({'num_format': '0.00%'})
+            ws_comp.set_column('E:E', 12, pct_fmt)
+            ws_comp.set_column('A:A', 20)
+            ws_comp.set_column('B:D', 15)
+
+    # 3. Create the Download Button
+    st.download_button(
+        label="📥 Download Professional Excel Report",
+        data=buffer.getvalue(),
+        file_name="luxor_mining_model.xlsx",
+        mime="application/vnd.ms-excel"
+    )
 
 else:
     st.warning("Please add data to the table.")
