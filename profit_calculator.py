@@ -11,7 +11,8 @@ st.markdown("Build fleet scenarios, calculate metrics, and compare specific conf
 # --- Sidebar: Global Settings ---
 st.sidebar.header("1. Global Settings")
 power_price = st.sidebar.number_input("Power Price ($/kWh)", value=0.05, format="%.4f")
-pool_fee_percent = st.sidebar.number_input("Pool Fee (%)", value=1.5, format="%.2f")
+baseline_firmware_fee = st.sidebar.number_input("Baseline Firmware Fee (%)", value=1.5, format="%.2f", help="Firmware fee for baseline configuration")
+target_firmware_fee = st.sidebar.number_input("Target Firmware Fee (%)", value=1.5, format="%.2f", help="Firmware fee for target configuration (used in comparisons)")
 hashprice = st.sidebar.number_input("Hashprice ($/PH/s/Day)", value=60.0, help="Revenue per PH/s per day")
 
 st.sidebar.markdown("---")
@@ -63,10 +64,10 @@ if not edited_df.empty:
     # Revenue
     edited_df["Rev/Miner ($)"] = edited_df["Hashrate (TH/s)"] * hashprice_per_th
     
-    # Cost
+    # Cost (using baseline firmware fee for main table)
     daily_power_cost = (edited_df["Power (W)"] / 1000) * 24 * power_price
-    pool_fee_cost = edited_df["Rev/Miner ($)"] * (pool_fee_percent / 100)
-    edited_df["Cost/Miner ($)"] = daily_power_cost + pool_fee_cost
+    firmware_fee_cost = edited_df["Rev/Miner ($)"] * (baseline_firmware_fee / 100)
+    edited_df["Cost/Miner ($)"] = daily_power_cost + firmware_fee_cost
     
     # Profit
     edited_df["Profit/Miner ($)"] = edited_df["Rev/Miner ($)"] - edited_df["Cost/Miner ($)"]
@@ -128,9 +129,26 @@ if not edited_df.empty:
 
         # 2. Extract Data
         row_a = display_df.iloc[idx_a]
-        row_b = display_df.iloc[idx_b]
+        row_b_base = display_df.iloc[idx_b]
+        
+        # Recalculate row_b with target firmware fee
+        hashprice_per_th = hashprice / 1000
+        rev_b = row_b_base["Hashrate (TH/s)"] * hashprice_per_th
+        daily_power_cost_b = (row_b_base["Power (W)"] / 1000) * 24 * power_price
+        firmware_fee_cost_b = rev_b * (target_firmware_fee / 100)
+        cost_b = daily_power_cost_b + firmware_fee_cost_b
+        profit_b = rev_b - cost_b
+        fleet_profit_b = profit_b * fleet_size
+        
+        # Create updated row_b with target firmware fee calculations
+        row_b = row_b_base.copy()
+        row_b["Rev/Miner ($)"] = round(rev_b, 2)
+        row_b["Cost/Miner ($)"] = round(cost_b, 2)
+        row_b["Profit/Miner ($)"] = round(profit_b, 2)
+        row_b["Fleet Profit ($)"] = round(fleet_profit_b, 2)
         
         comparison_title = f"Comparison: {options_map[idx_b]} vs Baseline {options_map[idx_a]}"
+        st.caption(f"Baseline uses {baseline_firmware_fee}% firmware fee | Target uses {target_firmware_fee}% firmware fee")
 
         # 3. Build Comparison Logic
         metrics_config = [
@@ -207,8 +225,8 @@ if not edited_df.empty:
         # --- SHEET 1: MODEL SUMMARY ---
         # Create a dataframe for the global settings
         settings_data = {
-            "Parameter": ["Power Price ($/kWh)", "Hashprice ($/PH/Day)", "Pool Fee (%)", "Fleet Size"],
-            "Value": [power_price, hashprice, pool_fee_percent, fleet_size]
+            "Parameter": ["Power Price ($/kWh)", "Hashprice ($/PH/Day)", "Baseline Firmware Fee (%)", "Target Firmware Fee (%)", "Fleet Size"],
+            "Value": [power_price, hashprice, baseline_firmware_fee, target_firmware_fee, fleet_size]
         }
         settings_df = pd.DataFrame(settings_data)
         
