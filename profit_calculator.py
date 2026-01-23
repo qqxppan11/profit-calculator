@@ -1,279 +1,548 @@
 import streamlit as st
+
 import pandas as pd
-import io
+
+import io  # Required for handling the Excel file in memory
+
+
 
 # --- Page Configuration ---
+
 st.set_page_config(page_title="Miner Profitability Modeling", layout="wide")
 
+
+
 st.title("⚡ Miner Profitability & Comparison Tool")
-st.markdown("Global Baseline analysis with specific peer-to-peer comparison.")
 
-# --- Session State ---
-if 'data' not in st.session_state:
-    st.session_state.data = pd.DataFrame([
-        {"Model": "S19 XP", "Profile": "Normal", "Hashrate (TH/s)": 140.0, "Power (W)": 3010.0},
-        {"Model": "S21", "Profile": "Normal", "Hashrate (TH/s)": 200.0, "Power (W)": 3500.0},
-        {"Model": "S19j Pro", "Profile": "Oc", "Hashrate (TH/s)": 104.0, "Power (W)": 3068.0},
-    ])
+st.markdown("Build fleet scenarios, calculate metrics, and compare specific configurations.")
 
-# --- Sidebar: Settings ---
+
+
+# --- Sidebar: Global Settings ---
+
 st.sidebar.header("1. Global Settings")
+
 power_price = st.sidebar.number_input("Power Price ($/kWh)", value=0.05, format="%.4f")
-hashprice = st.sidebar.number_input("Hashprice ($/PH/s/Day)", value=60.0)
-fleet_size = st.sidebar.number_input("Fleet Size", value=100, step=1)
+
+baseline_firmware_fee = st.sidebar.number_input("Baseline Firmware Fee (%)", value=1.5, format="%.2f", help="Firmware fee for baseline configuration")
+
+target_firmware_fee = st.sidebar.number_input("Target Firmware Fee (%)", value=1.5, format="%.2f", help="Firmware fee for target configuration (used in comparisons)")
+
+hashprice = st.sidebar.number_input("Hashprice ($/PH/s/Day)", value=60.0, help="Revenue per PH/s per day")
+
+
 
 st.sidebar.markdown("---")
-st.sidebar.header("2. Fee Structure")
-st.sidebar.caption("Define distinct fees for different scenarios.")
 
-# 3 Specific Fees as requested
-col_fee_1, col_fee_2 = st.sidebar.columns(2)
-with col_fee_1:
-    fee_global_base = st.number_input("Global Base Fee (%)", value=1.0, format="%.2f", help="Fee for the Global Baseline machine")
-    fee_dual_base   = st.number_input("Dual Base Fee (%)", value=1.5, format="%.2f", help="Fee for Baseline (A) in comparison")
-with col_fee_2:
-    # Spacer to align or just keep Target Fee below
-    pass
-fee_target = st.sidebar.number_input("Target Fee (%)", value=2.0, format="%.2f", help="Fee for Target (B) and all other machines")
+st.sidebar.header("2. Fleet Settings")
 
-# --- Main Interface ---
-st.subheader("3. Machine Configurations")
-edited_df = st.data_editor(
-    st.session_state.data,
-    num_rows="dynamic",
-    use_container_width=True,
-    key="editor",
-    column_config={
-        "Hashrate (TH/s)": st.column_config.NumberColumn(format="%.2f"),
-        "Power (W)": st.column_config.NumberColumn(format="%.0f"),
-        "Model": st.column_config.TextColumn(required=True),
-    }
-)
+fleet_size = st.sidebar.number_input("Fleet Size (num machines)", value=100, step=1)
 
-if not edited_df.empty:
-    # --- 1. DATA PREP ---
-    proc_df = edited_df.copy()
-    proc_df["Hashrate (TH/s)"] = pd.to_numeric(proc_df["Hashrate (TH/s)"])
-    proc_df["Power (W)"] = pd.to_numeric(proc_df["Power (W)"])
-    proc_df["display_name"] = proc_df["Model"] + " (" + proc_df["Profile"] + ")"
 
-    # Sidebar: Global Baseline Selector
-    st.sidebar.markdown("---")
-    st.sidebar.header("3. Baseline Selection")
-    model_options = proc_df["display_name"].tolist()
-    global_baseline_name = st.sidebar.selectbox("Global Baseline", options=model_options)
 
-    # --- 2. GLOBAL CALCULATIONS ---
-    hashprice_per_th = hashprice / 1000
-    
-    # Revenue
-    proc_df["Rev/Miner ($)"] = proc_df["Hashrate (TH/s)"] * hashprice_per_th
-    
-    # Power Cost
-    proc_df["Daily Power ($)"] = (proc_df["Power (W)"] / 1000) * 24 * power_price
-    
-    # Fee Calculation (Global Logic)
-    def get_global_fee_pct(row):
-        return fee_global_base if row["display_name"] == global_baseline_name else fee_target
+# --- Session State to store the table data ---
 
-    proc_df["Global Fee %"] = proc_df.apply(get_global_fee_pct, axis=1)
-    proc_df["Fee ($)"] = proc_df["Rev/Miner ($)"] * (proc_df["Global Fee %"] / 100)
-    
-    # Profit
-    proc_df["Cost/Miner ($)"] = proc_df["Daily Power ($)"] + proc_df["Fee ($)"]
-    proc_df["Profit/Miner ($)"] = proc_df["Rev/Miner ($)"] - proc_df["Cost/Miner ($)"]
-    proc_df["Fleet Profit ($)"] = proc_df["Profit/Miner ($)"] * fleet_size
-    
-    # Efficiency
-    proc_df["Efficiency (J/TH)"] = proc_df.apply(lambda x: x["Power (W)"]/x["Hashrate (TH/s)"] if x["Hashrate (TH/s)"] > 0 else 0, axis=1)
+if 'data' not in st.session_state:
 
-    # --- 3. GLOBAL DISPLAY ---
-    st.divider()
-    st.subheader("4. Global Results")
-    st.caption(f"Global Baseline: **{global_baseline_name}** ({fee_global_base}%) vs Others ({fee_target}%)")
+    st.session_state.data = pd.DataFrame(
 
-    # Get Global Baseline Row
-    global_base_row = proc_df[proc_df["display_name"] == global_baseline_name].iloc[0]
+        [{"Model": "S19 XP", "Profile": "Normal", "Hashrate (TH/s)": 140.0, "Power (W)": 3010.0}],
 
-    # Helper for String Formatting
-    def fmt_stat(val, base, is_money=False):
-        diff = val - base
-        f_val = f"${val:,.2f}" if is_money else f"{val:,.1f}"
-        if abs(diff) < 0.001: return f_val
-        sign = "+" if diff > 0 else ""
-        f_diff = f"{sign}${diff:,.2f}" if is_money else f"{sign}{diff:,.1f}"
-        return f"{f_val} ({f_diff})"
-
-    # Display DF
-    display_df = pd.DataFrame()
-    display_df["Model"] = proc_df["Model"]
-    display_df["Profile"] = proc_df["Profile"]
-    display_df["Hashrate"] = proc_df["Hashrate (TH/s)"].apply(lambda x: fmt_stat(x, global_base_row["Hashrate (TH/s)"]))
-    display_df["Power"] = proc_df["Power (W)"].apply(lambda x: fmt_stat(x, global_base_row["Power (W)"]))
-    display_df["Efficiency"] = proc_df["Efficiency (J/TH)"].apply(lambda x: fmt_stat(x, global_base_row["Efficiency (J/TH)"]))
-    display_df["Rev/Miner"] = proc_df["Rev/Miner ($)"].apply(lambda x: fmt_stat(x, global_base_row["Rev/Miner ($)"], True))
-    display_df["Profit/Miner"] = proc_df["Profit/Miner ($)"].apply(lambda x: fmt_stat(x, global_base_row["Profit/Miner ($)"], True))
-    display_df["Fleet Profit"] = proc_df["Fleet Profit ($)"].apply(lambda x: fmt_stat(x, global_base_row["Fleet Profit ($)"], True))
-
-    selection = st.dataframe(display_df, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row")
-
-    # --- 4. DUAL COMPARISON (With Specific Fees & Fixed Colors) ---
-    selected_indices = selection.selection.rows
-    
-    if len(selected_indices) == 2:
-        st.divider()
-        st.subheader("⚖️ Peer-to-Peer Comparison")
-        
-        # Get raw data for the two selected rows
-        row_a_raw = proc_df.iloc[selected_indices[0]].copy()
-        row_b_raw = proc_df.iloc[selected_indices[1]].copy()
-        
-        # --- RECALCULATE A (Use Dual Baseline Fee) ---
-        rev_a = row_a_raw["Rev/Miner ($)"] # Revenue doesn't change based on fee
-        cost_a = row_a_raw["Daily Power ($)"] + (rev_a * (fee_dual_base / 100))
-        profit_a = rev_a - cost_a
-        
-        # --- RECALCULATE B (Use Target Fee) ---
-        rev_b = row_b_raw["Rev/Miner ($)"]
-        cost_b = row_b_raw["Daily Power ($)"] + (rev_b * (fee_target / 100))
-        profit_b = rev_b - cost_b
-        
-        col_comp_1, col_comp_2 = st.columns(2)
-        with col_comp_1:
-            st.info(f"**Baseline (A):** {row_a_raw['display_name']} @ {fee_dual_base}% Fee")
-        with col_comp_2:
-            st.success(f"**Target (B):** {row_b_raw['display_name']} @ {fee_target}% Fee")
-
-        # Comparison Logic
-        metrics = [
-            {"name": "Hashrate (TH/s)", "val_a": row_a_raw["Hashrate (TH/s)"], "val_b": row_b_raw["Hashrate (TH/s)"], "better": "higher", "is_money": False},
-            {"name": "Power (W)",       "val_a": row_a_raw["Power (W)"],       "val_b": row_b_raw["Power (W)"],       "better": "lower",  "is_money": False},
-            {"name": "Efficiency (J/TH)","val_a": row_a_raw["Efficiency (J/TH)"],"val_b": row_b_raw["Efficiency (J/TH)"],"better": "lower",  "is_money": False},
-            {"name": "Profit/Miner ($)","val_a": profit_a,                     "val_b": profit_b,                     "better": "higher", "is_money": True},
-            {"name": "Fleet Profit ($)","val_a": profit_a * fleet_size,        "val_b": profit_b * fleet_size,        "better": "higher", "is_money": True},
-        ]
-        
-        # Build HTML Table manually to guarantee color rendering
-        html_rows = ""
-        for m in metrics:
-            val_a, val_b = m['val_a'], m['val_b']
-            diff = val_b - val_a
-            
-            # Formatting
-            fmt = "${:,.2f}" if m['is_money'] else "{:,.1f}"
-            val_a_str = fmt.format(val_a)
-            val_b_str = fmt.format(val_b)
-            
-            # Color & Sign logic
-            if abs(diff) < 0.001:
-                color = "gray"
-                diff_str = "0.0"
-            else:
-                is_good = (diff > 0 and m['better'] == "higher") or (diff < 0 and m['better'] == "lower")
-                color = "green" if is_good else "red"
-                sign = "+" if diff > 0 else ""
-                diff_str = f"{sign}{fmt.format(diff)}"
-
-            html_rows += f"""
-            <tr style="border-bottom: 1px solid #e0e0e0;">
-                <td style="padding: 8px;">{m['name']}</td>
-                <td style="padding: 8px;">{val_a_str}</td>
-                <td style="padding: 8px;">{val_b_str}</td>
-                <td style="padding: 8px; color: {color}; font-weight: bold;">{diff_str}</td>
-            </tr>
-            """
-            
-        st.markdown(f"""
-        <table style="width:100%; text-align: left; border-collapse: collapse;">
-            <thead>
-                <tr style="background-color: #f0f2f6;">
-                    <th style="padding: 8px;">Metric</th>
-                    <th style="padding: 8px;">Baseline (A)</th>
-                    <th style="padding: 8px;">Target (B)</th>
-                    <th style="padding: 8px;">Difference</th>
-                </tr>
-            </thead>
-            <tbody>
-                {html_rows}
-            </tbody>
-        </table>
-        """, unsafe_allow_html=True)
-
-    elif len(selected_indices) > 2:
-        st.warning("Please select exactly 2 rows to enable Peer-to-Peer comparison.")
-
-    # --- 5. EXCEL EXPORT WITH FORMULAS ---
-    st.divider()
-    
-    # 1. Setup Buffer
-    buffer = io.BytesIO()
-    
-    # 2. Use XlsxWriter
-    # We must access the workbook object directly to write formulas
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        ws = workbook.add_worksheet("Model Data")
-        
-        # Formats
-        fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
-        fmt_money = workbook.add_format({'num_format': '$#,##0.00'})
-        fmt_number = workbook.add_format({'num_format': '#,##0.0'})
-        fmt_pct = workbook.add_format({'num_format': '0.00%'})
-        
-        # Write Headers
-        headers = ["Model", "Profile", "Hashrate (TH)", "Power (W)", "Hashprice ($/PH)", "Power Price ($/kWh)", "Fee (%)", "Rev ($)", "Daily Power ($)", "Fee Cost ($)", "Total Cost ($)", "Profit ($)"]
-        for col_num, header in enumerate(headers):
-            ws.write(0, col_num, header, fmt_header)
-            
-        # Write Data Loop (With Formulas)
-        for i, row in enumerate(proc_df.itertuples(), start=1):
-            # Row data from dataframe
-            # itertuples structure: Index, Model, Profile, Hashrate, Power, ... (based on proc_df columns)
-            # We map specific columns manually to be safe
-            model = row.Model
-            profile = row.Profile
-            hr = row._3 # Hashrate (TH/s)
-            pwr = row._4 # Power (W)
-            fee_pct = row._10 / 100 # Global Fee % column
-            
-            # Excel Row Number (1-based for formula strings)
-            xl_row = i + 1 
-            
-            # Write Static Inputs
-            ws.write(i, 0, model)
-            ws.write(i, 1, profile)
-            ws.write(i, 2, hr, fmt_number)
-            ws.write(i, 3, pwr, fmt_number)
-            ws.write(i, 4, hashprice)
-            ws.write(i, 5, power_price)
-            ws.write(i, 6, fee_pct, fmt_pct)
-            
-            # Write Formulas (Reference Columns A=0, B=1, C=2...)
-            # Revenue (H) = Hashrate (C) * Hashprice (E) / 1000
-            ws.write_formula(i, 7, f"=C{xl_row}*E{xl_row}/1000", fmt_money)
-            
-            # Daily Power (I) = Power (D) / 1000 * 24 * PowerPrice (F)
-            ws.write_formula(i, 8, f"=(D{xl_row}/1000)*24*F{xl_row}", fmt_money)
-            
-            # Fee Cost (J) = Revenue (H) * Fee (G)
-            ws.write_formula(i, 9, f"=H{xl_row}*G{xl_row}", fmt_money)
-            
-            # Total Cost (K) = Power Cost (I) + Fee Cost (J)
-            ws.write_formula(i, 10, f"=I{xl_row}+J{xl_row}", fmt_money)
-            
-            # Profit (L) = Revenue (H) - Total Cost (K)
-            ws.write_formula(i, 11, f"=H{xl_row}-K{xl_row}", fmt_money)
-
-        # Adjust Widths
-        ws.set_column('A:B', 20)
-        ws.set_column('C:L', 15)
-    
-    st.download_button(
-        label="📥 Download Excel (With Formulas)",
-        data=buffer.getvalue(),
-        file_name="miner_model_formulas.xlsx",
-        mime="application/vnd.ms-excel"
     )
 
+
+
+# --- Main Interface: Input Table ---
+
+st.subheader("3. Machine Configurations")
+
+st.info("Edit the table below. You can now use decimals for both Hashrate and Power.")
+
+
+
+# Editable Dataframe
+
+edited_df = st.data_editor(
+
+    st.session_state.data,
+
+    num_rows="dynamic",
+
+    use_container_width=True,
+
+    key="editor",
+
+    column_config={
+
+        "Hashrate (TH/s)": st.column_config.NumberColumn(min_value=0, step=0.1, format="%.2f"),
+
+        "Power (W)": st.column_config.NumberColumn(min_value=0, step=0.1, format="%.1f"),
+
+        "Model": st.column_config.TextColumn(required=True),
+
+        "Profile": st.column_config.TextColumn()
+
+    }
+
+)
+
+
+
+# Initialize variables for export
+
+comp_df_clean = None
+
+comparison_title = ""
+
+
+
+# --- Calculation Engine ---
+
+if not edited_df.empty:
+
+    # 1. Prepare Data & Calculate Efficiency
+
+    edited_df["Hashrate (TH/s)"] = pd.to_numeric(edited_df["Hashrate (TH/s)"])
+
+    edited_df["Power (W)"] = pd.to_numeric(edited_df["Power (W)"])
+
+    
+
+    # Calculate Efficiency (J/TH)
+
+    edited_df["Efficiency (J/TH)"] = edited_df.apply(
+
+        lambda x: x["Power (W)"] / x["Hashrate (TH/s)"] if x["Hashrate (TH/s)"] > 0 else 0, axis=1
+
+    )
+
+
+
+    # 2. Calculate Financials
+
+    hashprice_per_th = hashprice / 1000
+
+    
+
+    # Revenue
+
+    edited_df["Rev/Miner ($)"] = edited_df["Hashrate (TH/s)"] * hashprice_per_th
+
+    
+
+    # Cost (using baseline firmware fee for main table)
+
+    daily_power_cost = (edited_df["Power (W)"] / 1000) * 24 * power_price
+
+    firmware_fee_cost = edited_df["Rev/Miner ($)"] * (baseline_firmware_fee / 100)
+
+    edited_df["Cost/Miner ($)"] = daily_power_cost + firmware_fee_cost
+
+    
+
+    # Profit
+
+    edited_df["Profit/Miner ($)"] = edited_df["Rev/Miner ($)"] - edited_df["Cost/Miner ($)"]
+
+    edited_df["Fleet Profit ($)"] = edited_df["Profit/Miner ($)"] * fleet_size
+
+
+
+    # 3. Formatting Data for Display
+
+    display_df = edited_df.copy()
+
+    
+
+    # Column Ordering
+
+    cols_order = [
+
+        "Model", "Profile", "Hashrate (TH/s)", "Power (W)", "Efficiency (J/TH)", 
+
+        "Rev/Miner ($)", "Cost/Miner ($)", "Profit/Miner ($)", "Fleet Profit ($)"
+
+    ]
+
+    final_cols = [c for c in cols_order if c in display_df.columns]
+
+    display_df = display_df[final_cols]
+
+
+
+    # Rounding for UI
+
+    display_df["Efficiency (J/TH)"] = display_df["Efficiency (J/TH)"].round(1)
+
+    money_cols = ["Rev/Miner ($)", "Cost/Miner ($)", "Profit/Miner ($)", "Fleet Profit ($)"]
+
+    display_df[money_cols] = display_df[money_cols].round(2)
+
+
+
+    st.markdown("### 4. Calculated Results")
+
+    
+
+    # Selection Table
+
+    selection = st.dataframe(
+
+        display_df,
+
+        use_container_width=True,
+
+        on_select="rerun",
+
+        selection_mode="multi-row",
+
+        column_config={
+
+            "Efficiency (J/TH)": st.column_config.NumberColumn(format="%.1f J/TH"),
+
+            "Power (W)": st.column_config.NumberColumn(format="%.1f W")
+
+        }
+
+    )
+
+
+
+    # --- Comparison Logic ---
+
+    selected_rows = selection.selection.rows
+
+    
+
+    if len(selected_rows) == 2:
+
+        st.divider()
+
+        st.subheader("⚖️ Comparison Mode")
+
+        
+
+        def get_row_name(idx):
+
+            if idx < len(display_df):
+
+                r = display_df.iloc[idx]
+
+                return f"{r['Model']} ({r['Profile']})"
+
+            return "Unknown"
+
+
+
+        # 1. Comparison Selectors
+
+        col_sel_a, col_sel_b = st.columns(2)
+
+        options_map = {idx: get_row_name(idx) for idx in selected_rows}
+
+        
+
+        with col_sel_a:
+
+            idx_a = st.selectbox("Select Baseline (A)", options=selected_rows, format_func=lambda x: options_map.get(x, "Unknown"), key="a")
+
+        with col_sel_b:
+
+            default_b = selected_rows[1] if len(selected_rows) > 1 and idx_a == selected_rows[0] else selected_rows[0]
+
+            if default_b not in selected_rows: default_b = selected_rows[0]
+
+            idx_b = st.selectbox("Select Target (B)", options=selected_rows, format_func=lambda x: options_map.get(x, "Unknown"), index=selected_rows.index(default_b), key="b")
+
+
+
+        # 2. Extract Data
+
+        row_a = display_df.iloc[idx_a]
+
+        row_b_base = display_df.iloc[idx_b]
+
+        
+
+        # Recalculate row_b with target firmware fee
+
+        hashprice_per_th = hashprice / 1000
+
+        rev_b = row_b_base["Hashrate (TH/s)"] * hashprice_per_th
+
+        daily_power_cost_b = (row_b_base["Power (W)"] / 1000) * 24 * power_price
+
+        firmware_fee_cost_b = rev_b * (target_firmware_fee / 100)
+
+        cost_b = daily_power_cost_b + firmware_fee_cost_b
+
+        profit_b = rev_b - cost_b
+
+        fleet_profit_b = profit_b * fleet_size
+
+        
+
+        # Create updated row_b with target firmware fee calculations
+
+        row_b = row_b_base.copy()
+
+        row_b["Rev/Miner ($)"] = round(rev_b, 2)
+
+        row_b["Cost/Miner ($)"] = round(cost_b, 2)
+
+        row_b["Profit/Miner ($)"] = round(profit_b, 2)
+
+        row_b["Fleet Profit ($)"] = round(fleet_profit_b, 2)
+
+        
+
+        comparison_title = f"Comparison: {options_map[idx_b]} vs Baseline {options_map[idx_a]}"
+
+        st.caption(f"Baseline uses {baseline_firmware_fee}% firmware fee | Target uses {target_firmware_fee}% firmware fee")
+
+
+
+        # 3. Build Comparison Logic
+
+        metrics_config = [
+
+            {"col": "Hashrate (TH/s)", "better": "higher"},
+
+            {"col": "Power (W)", "better": "lower"},
+
+            {"col": "Efficiency (J/TH)", "better": "lower"},
+
+            {"col": "Rev/Miner ($)", "better": "higher"},
+
+            {"col": "Cost/Miner ($)", "better": "lower"},
+
+            {"col": "Profit/Miner ($)", "better": "higher"},
+
+            {"col": "Fleet Profit ($)", "better": "higher"},
+
+        ]
+
+        
+
+        comp_data_display = [] # For Streamlit (with colors)
+
+        comp_data_clean = []   # For Excel (raw numbers)
+
+        
+
+        for item in metrics_config:
+
+            metric = item['col']
+
+            is_higher_better = item['better'] == "higher"
+
+            
+
+            val_a = row_a[metric]
+
+            val_b = row_b[metric]
+
+            diff = val_b - val_a
+
+            
+
+            if val_a != 0:
+
+                pct_diff = (diff / val_a) * 100
+
+            else:
+
+                pct_diff = 0.0
+
+            
+
+            # --- Visual Logic (Green/Red) for Streamlit ---
+
+            is_positive_outcome = (is_higher_better and diff > 0) or (not is_higher_better and diff < 0)
+
+            is_neutral = (diff == 0)
+
+
+
+            if is_neutral: color = "gray"
+
+            elif is_positive_outcome: color = "green"
+
+            else: color = "red"
+
+
+
+            comp_data_display.append({
+
+                "Metric": metric,
+
+                "Baseline (A)": val_a,
+
+                "Target (B)": val_b,
+
+                "Difference": f":{color}[{diff:+.2f}]",
+
+                "% Change": f":{color}[{pct_diff:+.2f}%]"
+
+            })
+
+            
+
+            # --- Clean Logic for Excel ---
+
+            comp_data_clean.append({
+
+                "Metric": metric,
+
+                "Baseline (A)": val_a,
+
+                "Target (B)": val_b,
+
+                "Diff": diff,
+
+                "% Change": pct_diff / 100 # Store as decimal for Excel % formatting
+
+            })
+
+            
+
+        # 4. Render Table in App
+
+        comp_df = pd.DataFrame(comp_data_display)
+
+        comp_df_clean = pd.DataFrame(comp_data_clean) # Save this for Export
+
+        
+
+        st.markdown(comp_df.to_markdown(index=False), unsafe_allow_html=True)
+
+        st.caption(comparison_title)
+
+            
+
+    elif len(selected_rows) > 2:
+
+        st.warning("Please select exactly 2 rows to compare.")
+
+    
+
+    # --- PROFESSIONAL EXCEL EXPORT ---
+
+    st.divider()
+
+    
+
+    # 1. Create a buffer to hold the Excel file in memory
+
+    buffer = io.BytesIO()
+
+    
+
+    # 2. Use xlsxwriter to create the file
+
+    # We use 'xlsxwriter' because it allows nice formatting (column widths, etc.)
+
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+
+        
+
+        # --- SHEET 1: MODEL SUMMARY ---
+
+        # Create a dataframe for the global settings
+
+        settings_data = {
+
+            "Parameter": ["Power Price ($/kWh)", "Hashprice ($/PH/Day)", "Baseline Firmware Fee (%)", "Target Firmware Fee (%)", "Fleet Size"],
+
+            "Value": [power_price, hashprice, baseline_firmware_fee, target_firmware_fee, fleet_size]
+
+        }
+
+        settings_df = pd.DataFrame(settings_data)
+
+        
+
+        # Write Settings
+
+        settings_df.to_excel(writer, sheet_name='Model Report', startrow=0, startcol=0, index=False)
+
+        
+
+        # Write Main Data (Leave a gap of 2 rows)
+
+        display_df.to_excel(writer, sheet_name='Model Report', startrow=6, startcol=0, index=False)
+
+        
+
+        # Access the workbook/worksheet for formatting
+
+        workbook = writer.book
+
+        worksheet = writer.sheets['Model Report']
+
+        
+
+        # Add a Header Format
+
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+
+        money_fmt = workbook.add_format({'num_format': '$#,##0.00'})
+
+        
+
+        # Widen Columns for readability
+
+        worksheet.set_column('A:A', 25) # Parameter / Model Name
+
+        worksheet.set_column('B:I', 18) # Data columns
+
+        
+
+        # --- SHEET 2: COMPARISON (If Active) ---
+
+        if comp_df_clean is not None:
+
+            comp_df_clean.to_excel(writer, sheet_name='Comparison', startrow=2, index=False)
+
+            ws_comp = writer.sheets['Comparison']
+
+            
+
+            # Write a title row
+
+            ws_comp.write(0, 0, comparison_title, workbook.add_format({'bold': True, 'font_size': 12}))
+
+            
+
+            # Format % column (Column E is index 4)
+
+            pct_fmt = workbook.add_format({'num_format': '0.00%'})
+
+            ws_comp.set_column('E:E', 12, pct_fmt)
+
+            ws_comp.set_column('A:A', 20)
+
+            ws_comp.set_column('B:D', 15)
+
+
+
+    # 3. Create the Download Button
+
+    st.download_button(
+
+        label="📥 Download Professional Excel Report",
+
+        data=buffer.getvalue(),
+
+        file_name="luxor_mining_model.xlsx",
+
+        mime="application/vnd.ms-excel"
+
+    )
+
+
+
 else:
-    st.warning("Add data to start.")
+
+    st.warning("Please add data to the table.")
+
