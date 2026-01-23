@@ -25,10 +25,16 @@ fleet_size = st.sidebar.number_input("Fleet Size", value=100, step=1)
 st.sidebar.markdown("---")
 st.sidebar.header("2. Fee Structure")
 st.sidebar.caption("Define distinct fees for different scenarios.")
+
 # 3 Specific Fees as requested
-fee_global_base = st.sidebar.number_input("Global Baseline Fee (%)", value=1.0, format="%.2f")
-fee_dual_base   = st.sidebar.number_input("Dual Compare Baseline Fee (%)", value=1.5, format="%.2f", help="Fee for Machine A in comparison")
-fee_target      = st.sidebar.number_input("Target Fee (%)", value=2.0, format="%.2f", help="Fee for Machine B (and general fleet)")
+col_fee_1, col_fee_2 = st.sidebar.columns(2)
+with col_fee_1:
+    fee_global_base = st.number_input("Global Base Fee (%)", value=1.0, format="%.2f", help="Fee for the Global Baseline machine")
+    fee_dual_base   = st.number_input("Dual Base Fee (%)", value=1.5, format="%.2f", help="Fee for Baseline (A) in comparison")
+with col_fee_2:
+    # Spacer to align or just keep Target Fee below
+    pass
+fee_target = st.sidebar.number_input("Target Fee (%)", value=2.0, format="%.2f", help="Fee for Target (B) and all other machines")
 
 # --- Main Interface ---
 st.subheader("3. Machine Configurations")
@@ -58,7 +64,6 @@ if not edited_df.empty:
     global_baseline_name = st.sidebar.selectbox("Global Baseline", options=model_options)
 
     # --- 2. GLOBAL CALCULATIONS ---
-    # We apply fees based on "Global Logic" here (Global Base vs Target)
     hashprice_per_th = hashprice / 1000
     
     # Revenue
@@ -120,7 +125,6 @@ if not edited_df.empty:
         st.subheader("⚖️ Peer-to-Peer Comparison")
         
         # Get raw data for the two selected rows
-        # We must re-calculate financials because the fees might change in this specific comparison view
         row_a_raw = proc_df.iloc[selected_indices[0]].copy()
         row_b_raw = proc_df.iloc[selected_indices[1]].copy()
         
@@ -205,74 +209,64 @@ if not edited_df.empty:
     buffer = io.BytesIO()
     
     # 2. Use XlsxWriter
-    workbook = _writer = pd.ExcelWriter(buffer, engine='xlsxwriter')
-    # We create the writer but we will access the workbook object directly
-    # to write formulas manually.
-    
-    # Create Sheet
-    workbook = workbook.book
-    ws = workbook.add_worksheet("Model Data")
-    
-    # Formats
-    fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
-    fmt_money = workbook.add_format({'num_format': '$#,##0.00'})
-    fmt_number = workbook.add_format({'num_format': '#,##0.0'})
-    fmt_pct = workbook.add_format({'num_format': '0.00%'})
-    
-    # Write Headers
-    headers = ["Model", "Profile", "Hashrate (TH)", "Power (W)", "Hashprice ($/PH)", "Power Cost ($/kWh)", "Fee (%)", "Rev ($)", "Daily Power ($)", "Fee Cost ($)", "Total Cost ($)", "Profit ($)"]
-    for col_num, header in enumerate(headers):
-        ws.write(0, col_num, header, fmt_header)
+    # We must access the workbook object directly to write formulas
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        ws = workbook.add_worksheet("Model Data")
         
-    # Write Data Loop (With Formulas)
-    # We iterate through the processed dataframe to get inputs, but we write FORMULAS for calcs
-    for i, row in enumerate(proc_df.itertuples(), start=1):
-        # Python row index starts at 0, Excel row starts at 1. 
-        # But we used row 0 for header, so data starts at row 1 (0-indexed in writer) or Row 2 (1-indexed in Excel logic).
-        # Xlsxwriter uses 0-indexed rows/cols.
+        # Formats
+        fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+        fmt_money = workbook.add_format({'num_format': '$#,##0.00'})
+        fmt_number = workbook.add_format({'num_format': '#,##0.0'})
+        fmt_pct = workbook.add_format({'num_format': '0.00%'})
         
-        # Determine Fee based on logic (Using the column we calculated earlier)
-        fee_val = row._10 / 100 # _10 is "Global Fee %" column index approx, safer to use name lookup if possible, but itertuples is fast.
-        # Let's use direct access for clarity
-        model = row.Model
-        profile = row.Profile
-        hr = row._3 # Hashrate column index in itertuples (Model=1, Profile=2, Hashrate=3...)
-        pwr = row._4 # Power
-        
-        # Excel Row Number (for formula string, 1-based)
-        xl_row = i + 1 
-        
-        # Write Static Inputs
-        ws.write(i, 0, model)
-        ws.write(i, 1, profile)
-        ws.write(i, 2, hr, fmt_number)
-        ws.write(i, 3, pwr, fmt_number)
-        ws.write(i, 4, hashprice)
-        ws.write(i, 5, power_price)
-        ws.write(i, 6, row._10/100, fmt_pct) # Fee %
-        
-        # Write Formulas
-        # Revenue = Hashrate (C) * Hashprice (E) / 1000
-        ws.write_formula(i, 7, f"=C{xl_row}*E{xl_row}/1000", fmt_money)
-        
-        # Daily Power = Power (D) / 1000 * 24 * PowerPrice (F)
-        ws.write_formula(i, 8, f"=(D{xl_row}/1000)*24*F{xl_row}", fmt_money)
-        
-        # Fee Cost = Revenue (H) * Fee (G)
-        ws.write_formula(i, 9, f"=H{xl_row}*G{xl_row}", fmt_money)
-        
-        # Total Cost = Power Cost (I) + Fee Cost (J)
-        ws.write_formula(i, 10, f"=I{xl_row}+J{xl_row}", fmt_money)
-        
-        # Profit = Revenue (H) - Total Cost (K)
-        ws.write_formula(i, 11, f"=H{xl_row}-K{xl_row}", fmt_money)
+        # Write Headers
+        headers = ["Model", "Profile", "Hashrate (TH)", "Power (W)", "Hashprice ($/PH)", "Power Price ($/kWh)", "Fee (%)", "Rev ($)", "Daily Power ($)", "Fee Cost ($)", "Total Cost ($)", "Profit ($)"]
+        for col_num, header in enumerate(headers):
+            ws.write(0, col_num, header, fmt_header)
+            
+        # Write Data Loop (With Formulas)
+        for i, row in enumerate(proc_df.itertuples(), start=1):
+            # Row data from dataframe
+            # itertuples structure: Index, Model, Profile, Hashrate, Power, ... (based on proc_df columns)
+            # We map specific columns manually to be safe
+            model = row.Model
+            profile = row.Profile
+            hr = row._3 # Hashrate (TH/s)
+            pwr = row._4 # Power (W)
+            fee_pct = row._10 / 100 # Global Fee % column
+            
+            # Excel Row Number (1-based for formula strings)
+            xl_row = i + 1 
+            
+            # Write Static Inputs
+            ws.write(i, 0, model)
+            ws.write(i, 1, profile)
+            ws.write(i, 2, hr, fmt_number)
+            ws.write(i, 3, pwr, fmt_number)
+            ws.write(i, 4, hashprice)
+            ws.write(i, 5, power_price)
+            ws.write(i, 6, fee_pct, fmt_pct)
+            
+            # Write Formulas (Reference Columns A=0, B=1, C=2...)
+            # Revenue (H) = Hashrate (C) * Hashprice (E) / 1000
+            ws.write_formula(i, 7, f"=C{xl_row}*E{xl_row}/1000", fmt_money)
+            
+            # Daily Power (I) = Power (D) / 1000 * 24 * PowerPrice (F)
+            ws.write_formula(i, 8, f"=(D{xl_row}/1000)*24*F{xl_row}", fmt_money)
+            
+            # Fee Cost (J) = Revenue (H) * Fee (G)
+            ws.write_formula(i, 9, f"=H{xl_row}*G{xl_row}", fmt_money)
+            
+            # Total Cost (K) = Power Cost (I) + Fee Cost (J)
+            ws.write_formula(i, 10, f"=I{xl_row}+J{xl_row}", fmt_money)
+            
+            # Profit (L) = Revenue (H) - Total Cost (K)
+            ws.write_formula(i, 11, f"=H{xl_row}-K{xl_row}", fmt_money)
 
-    # Adjust Widths
-    ws.set_column('A:B', 20)
-    ws.set_column('C:L', 15)
-    
-    # Close Writer
-    workbook.close()
+        # Adjust Widths
+        ws.set_column('A:B', 20)
+        ws.set_column('C:L', 15)
     
     st.download_button(
         label="📥 Download Excel (With Formulas)",
