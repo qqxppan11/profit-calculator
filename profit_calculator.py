@@ -72,7 +72,7 @@ baseline_index = st.sidebar.selectbox(
 )
 show_baseline_comp = st.sidebar.toggle("Show vs Baseline Columns", value=True)
 
-# Initialize export variable to prevent NameError
+# Initialize export variable
 comp_df_clean = None
 
 # --- Calculation Engine ---
@@ -98,17 +98,16 @@ if not edited_df.empty:
     calc_df["Profit/Day ($)"] = calc_df["Rev/Day ($)"] - calc_df["Cost/Day ($)"]
     calc_df["Fleet Profit ($)"] = calc_df["Profit/Day ($)"] * fleet_size
 
-    # 2. Formatting & Delta Logic
+    # 2. Formatting & Delta Logic (For UI Display)
     base_cols = ["Model", "Profile", "Hashrate (TH/s)", "Power (W)", "Efficiency (J/TH)", "Rev/Day ($)", "Cost/Day ($)", "Profit/Day ($)", "Fleet Profit ($)"]
     
-    # Identify numeric columns for strict formatting (prevents ValueError)
     numeric_display_cols = ["Hashrate (TH/s)", "Power (W)", "Efficiency (J/TH)", "Rev/Day ($)", "Cost/Day ($)", "Profit/Day ($)", "Fleet Profit ($)"]
     money_cols = ["Rev/Day ($)", "Cost/Day ($)", "Profit/Day ($)", "Fleet Profit ($)"]
 
     if show_baseline_comp:
         base_r = calc_df.loc[baseline_index]
         
-        # Helper to create "Delta (Pct%)" string
+        # Helper to create "Delta (Pct%)" string for UI
         def make_delta_str(val, base_val, is_money=False):
             diff = val - base_val
             if base_val == 0:
@@ -116,7 +115,6 @@ if not edited_df.empty:
             else:
                 pct = (diff / base_val) * 100
             
-            # Format
             fmt_diff = f"{diff:+,.2f}" if is_money else f"{diff:+.1f}"
             if is_money and diff == 0: fmt_diff = "$0.00"
             if is_money and diff != 0: fmt_diff = f"${diff:+,.2f}"
@@ -144,25 +142,18 @@ if not edited_df.empty:
     st.markdown("### 4. Calculated Results")
     
     # --- STYLING LOGIC ---
-    # Function to color text based on string content ("+" is green/red, "-" is red/green)
     def color_delta_strings(val, mode='high_good'):
         if not isinstance(val, str): return ''
-        # Check first character (ignoring '$' if present)
         clean_val = val.replace('$', '')
         if clean_val.startswith('+'):
             color = 'green' if mode == 'high_good' else 'red'
         elif clean_val.startswith('-'):
             color = 'red' if mode == 'high_good' else 'green'
         else:
-            return 'color: gray' # For 0.00
-            
+            return 'color: gray'
         return f'color: {color}'
 
-    # Apply Styler
     styler = final_df.style
-    
-    # 1. Format standard numeric columns (Safe subsetting)
-    # Note: We filter strictly to columns that exist in final_df
     valid_numeric_cols = [c for c in numeric_display_cols if c in final_df.columns]
     valid_money_cols = [c for c in money_cols if c in final_df.columns]
     
@@ -170,7 +161,6 @@ if not edited_df.empty:
     styler = styler.format("{:.0f}", subset=[c for c in valid_numeric_cols if "Power" in c])
     styler = styler.format("${:.2f}", subset=valid_money_cols)
 
-    # 2. Color Deltas (Only if columns exist)
     if show_baseline_comp:
         styler = styler.applymap(lambda v: color_delta_strings(v, 'high_good'), subset=["Δ Hash", "Δ Profit"])
         styler = styler.applymap(lambda v: color_delta_strings(v, 'low_good'), subset=["Δ Power", "Δ Eff"])
@@ -278,11 +268,13 @@ if not edited_df.empty:
         workbook = writer.book
         ws = workbook.add_worksheet("Model Report")
         
+        # Format Styles
         fmt_header = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
         fmt_money = workbook.add_format({'num_format': '$#,##0.00'})
         fmt_number = workbook.add_format({'num_format': '#,##0.00'})
+        fmt_pct = workbook.add_format({'num_format': '0.00%'})
         
-        # Globals
+        # 1. Globals
         ws.write(0, 0, "Global Assumptions", fmt_header)
         ws.write(1, 0, "Power Price ($/kWh)")
         ws.write(1, 1, power_price)
@@ -293,30 +285,88 @@ if not edited_df.empty:
         ws.write(4, 0, "Standard Fee (%)")
         ws.write(4, 1, std_firmware_fee)
         
-        # Main Data
-        table_start_row = 7
+        if show_baseline_comp:
+            ws.write(5, 0, "Baseline Model Index")
+            ws.write(5, 1, baseline_index)
+        
+        # 2. Main Data Table
+        table_start_row = 8
+        
+        # Base Headers
         headers = ["Model", "Profile", "Hashrate (TH)", "Power (W)", "Efficiency (J/TH)", "Rev/Day ($)", "Cost/Day ($)", "Profit/Day ($)", "Fleet Profit ($)"]
+        
+        # Append Comparison Headers if active
+        # We will separate Value and Pct for clarity
+        if show_baseline_comp:
+            # Adding empty column for visual separation? Optional.
+            headers.extend(["", "Δ Hash", "Δ Hash %", "Δ Power", "Δ Power %", "Δ Eff", "Δ Eff %", "Δ Profit", "Δ Profit %"])
+            
         for col_num, h in enumerate(headers):
             ws.write(table_start_row, col_num, h, fmt_header)
             
+        # Determine Excel row index for the Baseline Model
+        # Formula: Table Start + 1 (Header) + Index + 1 (1-based Excel)
+        baseline_excel_row_num = table_start_row + 1 + baseline_index + 1
+        
         for i, row in calc_df.iterrows():
             r = table_start_row + 1 + i
-            excel_row = r + 1 
+            row_num = r + 1 # Current Excel Row Number (1-based)
             
+            # Base Columns
             ws.write(r, 0, row["Model"])
             ws.write(r, 1, row["Profile"])
             ws.write(r, 2, row["Hashrate (TH/s)"]) 
             ws.write(r, 3, row["Power (W)"])       
-            ws.write_formula(r, 4, f'=IF(C{excel_row}>0, D{excel_row}/C{excel_row}, 0)', fmt_number)
-            ws.write_formula(r, 5, f'=C{excel_row}*($B$3/1000)', fmt_money)
-            ws.write_formula(r, 6, f'=(D{excel_row}/1000*24*$B$2)+(F{excel_row}*($B$5/100))', fmt_money)
-            ws.write_formula(r, 7, f'=F{excel_row}-G{excel_row}', fmt_money)
-            ws.write_formula(r, 8, f'=H{excel_row}*$B$4', fmt_money)
+            
+            # Base Formulas
+            # C=Hash, D=Power, E=Eff, F=Rev, G=Cost, H=Profit
+            ws.write_formula(r, 4, f'=IF(C{row_num}>0, D{row_num}/C{row_num}, 0)', fmt_number)
+            ws.write_formula(r, 5, f'=C{row_num}*($B$3/1000)', fmt_money)
+            ws.write_formula(r, 6, f'=(D{row_num}/1000*24*$B$2)+(F{row_num}*($B$5/100))', fmt_money)
+            ws.write_formula(r, 7, f'=F{row_num}-G{row_num}', fmt_money)
+            ws.write_formula(r, 8, f'=H{row_num}*$B$4', fmt_money)
+            
+            # Comparison Formulas
+            if show_baseline_comp:
+                # Spacer at col 9 (J)
+                
+                # We need absolute reference to baseline cells:
+                # Baseline Hash is $C${baseline_excel_row_num}
+                base_hash = f"$C${baseline_excel_row_num}"
+                base_pwr  = f"$D${baseline_excel_row_num}"
+                base_eff  = f"$E${baseline_excel_row_num}"
+                base_prof = f"$H${baseline_excel_row_num}"
+                
+                # Current cells
+                curr_hash = f"C{row_num}"
+                curr_pwr  = f"D{row_num}"
+                curr_eff  = f"E{row_num}"
+                curr_prof = f"H{row_num}"
+                
+                # Write Deltas (Value, %)
+                # Col 10 (K) -> Delta Hash
+                ws.write_formula(r, 10, f'={curr_hash}-{base_hash}', fmt_number)
+                ws.write_formula(r, 11, f'=IF({base_hash}<>0, ({curr_hash}-{base_hash})/{base_hash}, 0)', fmt_pct)
+                
+                # Col 12 (M) -> Delta Power
+                ws.write_formula(r, 12, f'={curr_pwr}-{base_pwr}', fmt_number)
+                ws.write_formula(r, 13, f'=IF({base_pwr}<>0, ({curr_pwr}-{base_pwr})/{base_pwr}, 0)', fmt_pct)
+                
+                # Col 14 (O) -> Delta Eff
+                ws.write_formula(r, 14, f'={curr_eff}-{base_eff}', fmt_number)
+                ws.write_formula(r, 15, f'=IF({base_eff}<>0, ({curr_eff}-{base_eff})/{base_eff}, 0)', fmt_pct)
+                
+                # Col 16 (Q) -> Delta Profit
+                ws.write_formula(r, 16, f'={curr_prof}-{base_prof}', fmt_money)
+                ws.write_formula(r, 17, f'=IF({base_prof}<>0, ({curr_prof}-{base_prof})/{base_prof}, 0)', fmt_pct)
 
+        # Columns Width
         ws.set_column('A:B', 20)
         ws.set_column('C:I', 15)
+        if show_baseline_comp:
+            ws.set_column('K:R', 12)
 
-        # Comparison (Safe check)
+        # 3. Comparison Mode Sheet
         if comp_df_clean is not None:
             ws_comp = workbook.add_worksheet("Comparison Mode")
             ws_comp.write(0, 0, comparison_title, fmt_header)
@@ -330,7 +380,7 @@ if not edited_df.empty:
                 ws_comp.write(i+3, 1, row["Scenario A"], fmt_number)
                 ws_comp.write(i+3, 2, row["Scenario B"], fmt_number)
                 ws_comp.write(i+3, 3, row["Difference"], fmt_number)
-                ws_comp.write(i+3, 4, row["% Change"], workbook.add_format({'num_format': '0.00%'}))
+                ws_comp.write(i+3, 4, row["% Change"], fmt_pct)
             
             ws_comp.set_column('A:A', 20)
             ws_comp.set_column('B:E', 15)
